@@ -29,6 +29,8 @@ const ENV = import.meta.env
 const OPENAI_API_KEY = ENV.VITE_OPENAI_API_KEY
 const GEMINI_API_KEY = ENV.VITE_GEMINI_API_KEY
 const ELEVENLABS_API_KEY = ENV.VITE_ELEVENLABS_API_KEY
+const ELEVENLABS_TTS_MODEL = ENV.VITE_ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5'
+const ELEVENLABS_VOICE_ID = ENV.VITE_ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'
 
 const PROVIDER_ENV_KEYS = {
   'Azure Speech-to-Text': ['VITE_AZURE_STT_KEY', 'VITE_AZURE_STT_REGION'],
@@ -49,9 +51,15 @@ const PROVIDER_ENV_KEYS = {
 }
 
 const IMPLEMENTED_CLOUD_PROVIDERS = new Set([
+  'Azure Speech-to-Text',
+  'Google Cloud STT',
+  'Deepgram',
+  'ElevenLabs STT',
   'OpenAI Whisper API',
   'Gemini',
   'OpenAI API',
+  'Azure Text-to-Speech',
+  'Google Cloud TTS',
   'OpenAI TTS',
   'ElevenLabs TTS',
 ])
@@ -80,6 +88,17 @@ function getProviderFallbackNote(provider) {
   }
 
   return `${provider} is ready with keys from frontend/.env.`
+}
+
+async function blobToBase64(audioBlob) {
+  const arrayBuffer = await audioBlob.arrayBuffer()
+  let binary = ''
+  const bytes = new Uint8Array(arrayBuffer)
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+  }
+  return btoa(binary)
 }
 
 const initialPreferences = readStoredPreferences()
@@ -135,11 +154,101 @@ async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) 
     return data.text?.trim() || ''
   }
 
+  if (selectedProvider === 'Deepgram' && hasProviderKeys(selectedProvider)) {
+    const response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true', {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${ENV.VITE_DEEPGRAM_API_KEY}`,
+        'Content-Type': audioBlob.type || 'audio/webm',
+      },
+      body: audioBlob,
+    })
+
+    if (!response.ok) {
+      throw new Error(`Deepgram request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || ''
+  }
+
+  if (selectedProvider === 'ElevenLabs STT' && hasProviderKeys(selectedProvider)) {
+    const formData = new FormData()
+    formData.append('file', new File([audioBlob], 'recording.webm', { type: audioBlob.type || 'audio/webm' }))
+    formData.append('model_id', 'scribe_v1')
+    formData.append('language_code', 'en')
+
+    const response = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+      },
+      body: formData,
+    })
+
+    if (!response.ok) {
+      throw new Error(`ElevenLabs STT request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.text?.trim() || ''
+  }
+
+  if (selectedProvider === 'Google Cloud STT' && hasProviderKeys(selectedProvider)) {
+    const base64Audio = await blobToBase64(audioBlob)
+    const response = await fetch(
+      `https://speech.googleapis.com/v1/speech:recognize?key=${ENV.VITE_GOOGLE_CLOUD_STT_API_KEY}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          config: {
+            encoding: 'WEBM_OPUS',
+            languageCode: 'en-US',
+            enableAutomaticPunctuation: true,
+          },
+          audio: { content: base64Audio },
+        }),
+      },
+    )
+
+    if (!response.ok) {
+      throw new Error(`Google Cloud STT request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.results?.map((result) => result.alternatives?.[0]?.transcript || '').join(' ').trim()
+  }
+
+  if (selectedProvider === 'Azure Speech-to-Text' && hasProviderKeys(selectedProvider)) {
+    const azureSttUrl =
+      `https://${ENV.VITE_AZURE_STT_REGION}.stt.speech.microsoft.com/` +
+      'speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=simple'
+
+    const response = await fetch(azureSttUrl, {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': ENV.VITE_AZURE_STT_KEY,
+        'Content-Type': audioBlob.type || 'audio/webm; codecs=opus',
+      },
+      body: audioBlob,
+    })
+
+    if (!response.ok) {
+      throw new Error(`Azure STT request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.DisplayText?.trim() || ''
+  }
+
   if (fallbackTranscript?.trim()) {
     return fallbackTranscript.trim()
   }
 
-  return `[${selectedProvider}] Audio captured successfully. ${getProviderFallbackNote(selectedProvider)}`
+  throw new Error(`No transcript captured. ${getProviderFallbackNote(selectedProvider)}`)
 }
 
 async function generateAiResponse(prompt, selectedProvider, userName) {
@@ -241,6 +350,73 @@ function speakWithBrowserTts(text) {
 }
 
 async function synthesizeSpeech(text, selectedProvider) {
+  if (selectedProvider === 'Google Cloud TTS' && hasProviderKeys(selectedProvider)) {
+    const response = await fetch(
+      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ENV.VITE_GOOGLE_CLOUD_TTS_API_KEY}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          input: { text },
+          voice: { languageCode: 'en-US', ssmlGender: 'NEUTRAL' },
+          audioConfig: { audioEncoding: 'MP3' },
+        }),
+      },
+    )
+
+    if (!response.ok) {
+      throw new Error(`Google Cloud TTS request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    if (!data.audioContent) {
+      throw new Error('Google Cloud TTS returned no audio.')
+    }
+
+    const audioBlob = await (await fetch(`data:audio/mp3;base64,${data.audioContent}`)).blob()
+    await playAudioBlob(audioBlob)
+    return
+  }
+
+  if (selectedProvider === 'Azure Text-to-Speech' && hasProviderKeys(selectedProvider)) {
+    const escapedText = text
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&apos;')
+    const ssml = `
+      <speak version='1.0' xml:lang='en-US'>
+        <voice xml:lang='en-US' xml:gender='Female' name='en-US-JennyNeural'>
+          ${escapedText}
+        </voice>
+      </speak>
+    `.trim()
+
+    const response = await fetch(
+      `https://${ENV.VITE_AZURE_TTS_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
+      {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': ENV.VITE_AZURE_TTS_KEY,
+          'Content-Type': 'application/ssml+xml',
+          'X-Microsoft-OutputFormat': 'audio-16khz-32kbitrate-mono-mp3',
+        },
+        body: ssml,
+      },
+    )
+
+    if (!response.ok) {
+      throw new Error(`Azure TTS request failed (${response.status})`)
+    }
+
+    const audioBlob = await response.blob()
+    await playAudioBlob(audioBlob)
+    return
+  }
+
   if (selectedProvider === 'OpenAI TTS' && hasProviderKeys(selectedProvider) && OPENAI_API_KEY) {
     const response = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
@@ -266,7 +442,7 @@ async function synthesizeSpeech(text, selectedProvider) {
   }
 
   if (selectedProvider === 'ElevenLabs TTS' && hasProviderKeys(selectedProvider) && ELEVENLABS_API_KEY) {
-    const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/pNInz6obpgDQGcFmaJgB', {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -274,12 +450,23 @@ async function synthesizeSpeech(text, selectedProvider) {
       },
       body: JSON.stringify({
         text,
-        model_id: 'eleven_monolingual_v1',
+        model_id: ELEVENLABS_TTS_MODEL,
       }),
     })
 
     if (!response.ok) {
-      throw new Error(`ElevenLabs TTS request failed (${response.status})`)
+      let detail = ''
+      try {
+        const errData = await response.json()
+        detail = errData?.detail?.message || ''
+      } catch {
+        // Ignore body parse failures and use generic error.
+      }
+      throw new Error(
+        detail
+          ? `ElevenLabs TTS request failed (${response.status}): ${detail}`
+          : `ElevenLabs TTS request failed (${response.status})`,
+      )
     }
 
     const audioBlob = await response.blob()
@@ -451,7 +638,21 @@ function App() {
 
     try {
       setStatus(`Transcribing via ${sttService}...`)
-      const transcript = await transcribeAudio(audioBlob, sttService, recognitionTranscriptRef.current)
+      let transcript = ''
+      try {
+        transcript = await transcribeAudio(audioBlob, sttService, recognitionTranscriptRef.current)
+      } catch (sttError) {
+        if (recognitionTranscriptRef.current.trim()) {
+          transcript = recognitionTranscriptRef.current.trim()
+          addMessage(
+            'assistant',
+            `Cloud STT failed (${sttError.message || 'unknown error'}). Used browser speech transcript fallback.`,
+            'System',
+          )
+        } else {
+          throw sttError
+        }
+      }
       if (!transcript) {
         throw new Error('Transcription was empty.')
       }
@@ -467,7 +668,16 @@ function App() {
       addMessage('assistant', assistantResponse, aiService)
 
       setStatus(`Synthesizing voice via ${ttsService}...`)
-      await synthesizeSpeech(assistantResponse, ttsService)
+      try {
+        await synthesizeSpeech(assistantResponse, ttsService)
+      } catch (ttsError) {
+        await speakWithBrowserTts(assistantResponse)
+        addMessage(
+          'assistant',
+          `Cloud TTS failed (${ttsError.message || 'unknown error'}). Played browser speech fallback.`,
+          'System',
+        )
+      }
 
       setStatus('Done')
     } catch (err) {
