@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Frontend: Vite (F5)",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://127.0.0.1:5174",
+      "webRoot": "${workspaceFolder}/frontend",
+      "preLaunchTask": "npm: dev (frontend)"
+    }
+  ]
+}

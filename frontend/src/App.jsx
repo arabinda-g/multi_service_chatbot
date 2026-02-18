@@ -1,0 +1,613 @@
+import { useEffect, useRef, useState } from 'react'
+import './App.css'
+
+const STT_OPTIONS = [
+  'Azure Speech-to-Text',
+  'Google Cloud STT',
+  'Deepgram',
+  'OpenAI Whisper API',
+  'ElevenLabs STT',
+  'Wispr Flow',
+  'Murf Falcon',
+]
+
+const AI_OPTIONS = ['Gemini', 'OpenAI API']
+
+const TTS_OPTIONS = [
+  'Azure Text-to-Speech',
+  'Google Cloud TTS',
+  'OpenAI TTS',
+  'ElevenLabs TTS',
+  'Amazon Polly',
+  'Murf TTS',
+]
+
+const STORAGE_KEY = 'multiServiceChatbotPreferences'
+const DEFAULT_USER_NAME = 'Guest'
+
+const ENV = import.meta.env
+const OPENAI_API_KEY = ENV.VITE_OPENAI_API_KEY
+const GEMINI_API_KEY = ENV.VITE_GEMINI_API_KEY
+const ELEVENLABS_API_KEY = ENV.VITE_ELEVENLABS_API_KEY
+
+const PROVIDER_ENV_KEYS = {
+  'Azure Speech-to-Text': ['VITE_AZURE_STT_KEY', 'VITE_AZURE_STT_REGION'],
+  'Google Cloud STT': ['VITE_GOOGLE_CLOUD_STT_API_KEY'],
+  Deepgram: ['VITE_DEEPGRAM_API_KEY'],
+  'OpenAI Whisper API': ['VITE_OPENAI_API_KEY'],
+  'ElevenLabs STT': ['VITE_ELEVENLABS_API_KEY'],
+  'Wispr Flow': ['VITE_WISPR_FLOW_API_KEY'],
+  'Murf Falcon': ['VITE_MURF_FALCON_API_KEY'],
+  Gemini: ['VITE_GEMINI_API_KEY'],
+  'OpenAI API': ['VITE_OPENAI_API_KEY'],
+  'Azure Text-to-Speech': ['VITE_AZURE_TTS_KEY', 'VITE_AZURE_TTS_REGION'],
+  'Google Cloud TTS': ['VITE_GOOGLE_CLOUD_TTS_API_KEY'],
+  'OpenAI TTS': ['VITE_OPENAI_API_KEY'],
+  'ElevenLabs TTS': ['VITE_ELEVENLABS_API_KEY'],
+  'Amazon Polly': ['VITE_AWS_POLLY_ACCESS_KEY_ID', 'VITE_AWS_POLLY_SECRET_ACCESS_KEY', 'VITE_AWS_REGION'],
+  'Murf TTS': ['VITE_MURF_TTS_API_KEY'],
+}
+
+const IMPLEMENTED_CLOUD_PROVIDERS = new Set([
+  'OpenAI Whisper API',
+  'Gemini',
+  'OpenAI API',
+  'OpenAI TTS',
+  'ElevenLabs TTS',
+])
+
+function hasProviderKeys(provider) {
+  const requiredEnvKeys = PROVIDER_ENV_KEYS[provider] || []
+  if (!requiredEnvKeys.length) {
+    return false
+  }
+  return requiredEnvKeys.every((envName) => String(ENV[envName] || '').trim())
+}
+
+function getProviderFallbackNote(provider) {
+  const hasKeys = hasProviderKeys(provider)
+  const isImplemented = IMPLEMENTED_CLOUD_PROVIDERS.has(provider)
+
+  if (!hasKeys) {
+    const keyNames = PROVIDER_ENV_KEYS[provider]?.join(', ')
+    return keyNames
+      ? `Add ${keyNames} in frontend/.env to call ${provider}.`
+      : `Add provider keys in frontend/.env to call ${provider}.`
+  }
+
+  if (!isImplemented) {
+    return `${provider} keys are loaded from frontend/.env, but cloud adapter implementation is pending in this frontend-only demo.`
+  }
+
+  return `${provider} is ready with keys from frontend/.env.`
+}
+
+const initialPreferences = readStoredPreferences()
+
+function readStoredPreferences() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (!stored) {
+      return {
+        userName: '',
+        sttService: STT_OPTIONS[0],
+        aiService: AI_OPTIONS[0],
+        ttsService: TTS_OPTIONS[0],
+      }
+    }
+
+    const parsed = JSON.parse(stored)
+    return {
+      userName: typeof parsed.userName === 'string' ? parsed.userName : '',
+      sttService: STT_OPTIONS.includes(parsed.sttService) ? parsed.sttService : STT_OPTIONS[0],
+      aiService: AI_OPTIONS.includes(parsed.aiService) ? parsed.aiService : AI_OPTIONS[0],
+      ttsService: TTS_OPTIONS.includes(parsed.ttsService) ? parsed.ttsService : TTS_OPTIONS[0],
+    }
+  } catch {
+    return {
+      userName: '',
+      sttService: STT_OPTIONS[0],
+      aiService: AI_OPTIONS[0],
+      ttsService: TTS_OPTIONS[0],
+    }
+  }
+}
+
+async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) {
+  if (selectedProvider === 'OpenAI Whisper API' && hasProviderKeys(selectedProvider)) {
+    const formData = new FormData()
+    formData.append('file', new File([audioBlob], 'recording.webm', { type: audioBlob.type || 'audio/webm' }))
+    formData.append('model', 'whisper-1')
+
+    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: formData,
+    })
+
+    if (!response.ok) {
+      throw new Error(`OpenAI Whisper request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.text?.trim() || ''
+  }
+
+  if (fallbackTranscript?.trim()) {
+    return fallbackTranscript.trim()
+  }
+
+  return `[${selectedProvider}] Audio captured successfully. ${getProviderFallbackNote(selectedProvider)}`
+}
+
+async function generateAiResponse(prompt, selectedProvider, userName) {
+  if (selectedProvider === 'Gemini' && hasProviderKeys(selectedProvider) && GEMINI_API_KEY) {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: `User: ${userName}\nPrompt: ${prompt}` }] }],
+        }),
+      },
+    )
+
+    if (!response.ok) {
+      throw new Error(`Gemini request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No response from Gemini.'
+  }
+
+  if (selectedProvider === 'OpenAI API' && hasProviderKeys(selectedProvider) && OPENAI_API_KEY) {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a helpful assistant for a multi-service voice chatbot demo.',
+          },
+          {
+            role: 'user',
+            content: `User name: ${userName}\nPrompt: ${prompt}`,
+          },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`OpenAI API request failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.choices?.[0]?.message?.content?.trim() || 'No response from OpenAI API.'
+  }
+
+  return `Hi ${userName || DEFAULT_USER_NAME}! I heard: "${prompt}". ${getProviderFallbackNote(selectedProvider)}`
+}
+
+function playAudioBlob(audioBlob) {
+  return new Promise((resolve, reject) => {
+    const audioUrl = URL.createObjectURL(audioBlob)
+    const audio = new Audio(audioUrl)
+
+    const clear = () => {
+      URL.revokeObjectURL(audioUrl)
+    }
+
+    audio.onended = () => {
+      clear()
+      resolve()
+    }
+
+    audio.onerror = () => {
+      clear()
+      reject(new Error('Audio playback failed'))
+    }
+
+    audio.play().catch((err) => {
+      clear()
+      reject(err)
+    })
+  })
+}
+
+function speakWithBrowserTts(text) {
+  return new Promise((resolve) => {
+    if (!window.speechSynthesis) {
+      resolve()
+      return
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.rate = 1
+    utterance.pitch = 1
+    utterance.onend = resolve
+    utterance.onerror = resolve
+    window.speechSynthesis.speak(utterance)
+  })
+}
+
+async function synthesizeSpeech(text, selectedProvider) {
+  if (selectedProvider === 'OpenAI TTS' && hasProviderKeys(selectedProvider) && OPENAI_API_KEY) {
+    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini-tts',
+        voice: 'alloy',
+        input: text,
+        format: 'mp3',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`OpenAI TTS request failed (${response.status})`)
+    }
+
+    const audioBlob = await response.blob()
+    await playAudioBlob(audioBlob)
+    return
+  }
+
+  if (selectedProvider === 'ElevenLabs TTS' && hasProviderKeys(selectedProvider) && ELEVENLABS_API_KEY) {
+    const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/pNInz6obpgDQGcFmaJgB', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xi-api-key': ELEVENLABS_API_KEY,
+      },
+      body: JSON.stringify({
+        text,
+        model_id: 'eleven_monolingual_v1',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`ElevenLabs TTS request failed (${response.status})`)
+    }
+
+    const audioBlob = await response.blob()
+    await playAudioBlob(audioBlob)
+    return
+  }
+
+  await speakWithBrowserTts(text)
+}
+
+function App() {
+  const [userName, setUserName] = useState(initialPreferences.userName)
+  const [sttService, setSttService] = useState(initialPreferences.sttService)
+  const [aiService, setAiService] = useState(initialPreferences.aiService)
+  const [ttsService, setTtsService] = useState(initialPreferences.ttsService)
+  const [messages, setMessages] = useState([
+    {
+      role: 'assistant',
+      content: 'Choose your STT, AI and TTS providers, then click Start Recording to begin.',
+      provider: 'System',
+      time: new Date().toLocaleTimeString(),
+    },
+  ])
+  const [isRecording, setIsRecording] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [status, setStatus] = useState('Idle')
+  const [error, setError] = useState('')
+
+  const mediaRecorderRef = useRef(null)
+  const streamRef = useRef(null)
+  const chunksRef = useRef([])
+  const recognitionRef = useRef(null)
+  const recognitionTranscriptRef = useRef('')
+  const chatBodyRef = useRef(null)
+
+  useEffect(() => {
+    const preferences = {
+      userName,
+      sttService,
+      aiService,
+      ttsService,
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences))
+  }, [userName, sttService, aiService, ttsService])
+
+  useEffect(() => {
+    if (chatBodyRef.current) {
+      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight
+    }
+  }, [messages, status, error])
+
+  useEffect(() => {
+    return () => {
+      stopSpeechRecognition()
+      stopAudioStream()
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel()
+      }
+    }
+  }, [])
+
+  const addMessage = (role, content, provider) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        role,
+        content,
+        provider,
+        time: new Date().toLocaleTimeString(),
+      },
+    ])
+  }
+
+  function stopSpeechRecognition() {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+      recognitionRef.current = null
+    }
+  }
+
+  function stopAudioStream() {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
+  }
+
+  const startRecording = async () => {
+    if (isProcessing || isRecording) {
+      return
+    }
+
+    setError('')
+    setStatus('Listening...')
+    recognitionTranscriptRef.current = ''
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+
+      const recorder = new MediaRecorder(stream)
+      mediaRecorderRef.current = recorder
+      chunksRef.current = []
+
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size > 0) {
+          chunksRef.current.push(event.data)
+        }
+      }
+
+      recorder.onstop = async () => {
+        stopSpeechRecognition()
+        stopAudioStream()
+        setIsRecording(false)
+
+        const recordedBlob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        if (!recordedBlob.size) {
+          setStatus('Idle')
+          setError('No audio was captured.')
+          return
+        }
+
+        await handleConversationFlow(recordedBlob)
+      }
+
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition
+      if (Recognition) {
+        const recognition = new Recognition()
+        recognition.lang = 'en-US'
+        recognition.continuous = true
+        recognition.interimResults = true
+        recognition.onresult = (event) => {
+          let transcript = ''
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            transcript += event.results[i][0].transcript
+          }
+          recognitionTranscriptRef.current = transcript
+        }
+        recognition.onerror = () => {
+          // Keep the recording flow running even if speech recognition fails.
+        }
+        recognition.start()
+        recognitionRef.current = recognition
+      }
+
+      recorder.start()
+      setIsRecording(true)
+    } catch (err) {
+      setStatus('Idle')
+      setError(err.message || 'Microphone permission was denied.')
+      stopSpeechRecognition()
+      stopAudioStream()
+      setIsRecording(false)
+    }
+  }
+
+  const stopRecording = () => {
+    if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+      return
+    }
+
+    mediaRecorderRef.current.stop()
+    setStatus('Processing recording...')
+  }
+
+  const handleConversationFlow = async (audioBlob) => {
+    setIsProcessing(true)
+    setError('')
+
+    try {
+      setStatus(`Transcribing via ${sttService}...`)
+      const transcript = await transcribeAudio(audioBlob, sttService, recognitionTranscriptRef.current)
+      if (!transcript) {
+        throw new Error('Transcription was empty.')
+      }
+
+      addMessage('user', transcript, sttService)
+
+      setStatus(`Generating answer via ${aiService}...`)
+      const assistantResponse = await generateAiResponse(
+        transcript,
+        aiService,
+        userName.trim() || DEFAULT_USER_NAME,
+      )
+      addMessage('assistant', assistantResponse, aiService)
+
+      setStatus(`Synthesizing voice via ${ttsService}...`)
+      await synthesizeSpeech(assistantResponse, ttsService)
+
+      setStatus('Done')
+    } catch (err) {
+      setError(err.message || 'Conversation pipeline failed.')
+      setStatus('Idle')
+    } finally {
+      setIsProcessing(false)
+      recognitionTranscriptRef.current = ''
+    }
+  }
+
+  return (
+    <div className="container-fluid h-100 app-wrapper">
+      <div className="row h-100">
+        <section className="col-12 col-lg-4 border-end p-3 overflow-auto">
+          <h4 className="mb-3">Voice Chat Setup</h4>
+
+          <div className="mb-3">
+            <label htmlFor="userName" className="form-label">
+              User Name
+            </label>
+            <input
+              id="userName"
+              type="text"
+              className="form-control"
+              placeholder="Type your name"
+              value={userName}
+              onChange={(event) => setUserName(event.target.value)}
+            />
+          </div>
+
+          <div className="mb-3">
+            <label htmlFor="stt" className="form-label">
+              Speech-to-Text Service
+            </label>
+            <select
+              id="stt"
+              className="form-select"
+              value={sttService}
+              onChange={(event) => setSttService(event.target.value)}
+            >
+              {STT_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="mb-3">
+            <label htmlFor="aiService" className="form-label">
+              AI Service
+            </label>
+            <select
+              id="aiService"
+              className="form-select"
+              value={aiService}
+              onChange={(event) => setAiService(event.target.value)}
+            >
+              {AI_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="mb-4">
+            <label htmlFor="tts" className="form-label">
+              Text-to-Speech Service
+            </label>
+            <select
+              id="tts"
+              className="form-select"
+              value={ttsService}
+              onChange={(event) => setTtsService(event.target.value)}
+            >
+              {TTS_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="d-grid gap-2 mb-3">
+            {!isRecording ? (
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={startRecording}
+                disabled={isProcessing}
+              >
+                Start Recording
+              </button>
+            ) : (
+              <button type="button" className="btn btn-outline-danger" onClick={stopRecording}>
+                Stop Recording
+              </button>
+            )}
+          </div>
+
+          <div className="small text-secondary mb-2">
+            <strong>Status:</strong> {status}
+          </div>
+          {error && <div className="alert alert-danger py-2 mb-2">{error}</div>}
+
+          <div className="alert alert-light border small mb-0">
+            Cloud requests are used when related API keys are configured in <code>frontend/.env</code>.
+            Otherwise, local browser fallbacks are used so the app still works end-to-end.
+          </div>
+        </section>
+
+        <section className="col-12 col-lg-8 p-0 h-100">
+          <div className="card h-100 rounded-0">
+            <div className="card-header">
+              Chatbox (Full Height)
+              <span className="ms-2 badge text-bg-secondary">{userName.trim() || DEFAULT_USER_NAME}</span>
+            </div>
+            <div className="card-body chat-body" ref={chatBodyRef}>
+              {messages.map((message, index) => (
+                <div
+                  key={`${message.time}-${index}`}
+                  className={`d-flex mb-3 ${message.role === 'user' ? 'justify-content-end' : 'justify-content-start'}`}
+                >
+                  <div className={`message-bubble ${message.role === 'user' ? 'message-user' : 'message-assistant'}`}>
+                    <div className="small text-muted mb-1">
+                      {message.role === 'user' ? userName.trim() || DEFAULT_USER_NAME : 'Assistant'} via {message.provider}
+                    </div>
+                    <div>{message.content}</div>
+                    <div className="small text-muted mt-1">{message.time}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+export default App
