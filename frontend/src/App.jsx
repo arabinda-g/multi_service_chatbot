@@ -151,6 +151,8 @@ function readStoredPreferences() {
         sttService: STT_OPTIONS[0] || '',
         aiService: AI_OPTIONS[0] || '',
         ttsService: TTS_OPTIONS[0] || '',
+        elevenLabsVoiceId: ELEVENLABS_VOICE_ID,
+        murfTtsVoiceId: MURF_TTS_VOICE_ID,
       }
     }
 
@@ -160,6 +162,14 @@ function readStoredPreferences() {
       sttService: STT_OPTIONS.includes(parsed.sttService) ? parsed.sttService : STT_OPTIONS[0] || '',
       aiService: AI_OPTIONS.includes(parsed.aiService) ? parsed.aiService : AI_OPTIONS[0] || '',
       ttsService: TTS_OPTIONS.includes(parsed.ttsService) ? parsed.ttsService : TTS_OPTIONS[0] || '',
+      elevenLabsVoiceId:
+        typeof parsed.elevenLabsVoiceId === 'string' && parsed.elevenLabsVoiceId.trim()
+          ? parsed.elevenLabsVoiceId
+          : ELEVENLABS_VOICE_ID,
+      murfTtsVoiceId:
+        typeof parsed.murfTtsVoiceId === 'string' && parsed.murfTtsVoiceId.trim()
+          ? parsed.murfTtsVoiceId
+          : MURF_TTS_VOICE_ID,
     }
   } catch {
     return {
@@ -167,6 +177,8 @@ function readStoredPreferences() {
       sttService: STT_OPTIONS[0] || '',
       aiService: AI_OPTIONS[0] || '',
       ttsService: TTS_OPTIONS[0] || '',
+      elevenLabsVoiceId: ELEVENLABS_VOICE_ID,
+      murfTtsVoiceId: MURF_TTS_VOICE_ID,
     }
   }
 }
@@ -425,7 +437,9 @@ function speakWithBrowserTts(text) {
   })
 }
 
-async function synthesizeSpeech(text, selectedProvider) {
+async function synthesizeSpeech(text, selectedProvider, options = {}) {
+  const elevenLabsVoiceId = options.elevenLabsVoiceId?.trim() || ELEVENLABS_VOICE_ID
+  const murfTtsVoiceId = options.murfTtsVoiceId?.trim() || MURF_TTS_VOICE_ID
   if (selectedProvider === 'Murf TTS' && hasProviderKeys(selectedProvider)) {
     const response = await fetch(`${MURF_API_BASE_URL}/v1/speech/generate`, {
       method: 'POST',
@@ -435,7 +449,7 @@ async function synthesizeSpeech(text, selectedProvider) {
       },
       body: JSON.stringify({
         text,
-        voiceId: MURF_TTS_VOICE_ID,
+        voiceId: murfTtsVoiceId,
         format: 'MP3',
       }),
     })
@@ -572,7 +586,7 @@ async function synthesizeSpeech(text, selectedProvider) {
   }
 
   if (selectedProvider === 'ElevenLabs TTS' && hasProviderKeys(selectedProvider) && ELEVENLABS_API_KEY) {
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoiceId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -612,6 +626,12 @@ function App() {
   const [sttService, setSttService] = useState(initialPreferences.sttService)
   const [aiService, setAiService] = useState(initialPreferences.aiService)
   const [ttsService, setTtsService] = useState(initialPreferences.ttsService)
+  const [elevenLabsVoiceId, setElevenLabsVoiceId] = useState(
+    initialPreferences.elevenLabsVoiceId || ELEVENLABS_VOICE_ID,
+  )
+  const [murfTtsVoiceId, setMurfTtsVoiceId] = useState(
+    initialPreferences.murfTtsVoiceId || MURF_TTS_VOICE_ID,
+  )
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
@@ -655,14 +675,30 @@ function App() {
   }, [ttsService])
 
   useEffect(() => {
+    if (elevenLabsVoiceId.trim()) {
+      return
+    }
+    setElevenLabsVoiceId(ELEVENLABS_VOICE_ID)
+  }, [elevenLabsVoiceId])
+
+  useEffect(() => {
+    if (murfTtsVoiceId.trim()) {
+      return
+    }
+    setMurfTtsVoiceId(MURF_TTS_VOICE_ID)
+  }, [murfTtsVoiceId])
+
+  useEffect(() => {
     const preferences = {
       userName,
       sttService,
       aiService,
       ttsService,
+      elevenLabsVoiceId,
+      murfTtsVoiceId,
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences))
-  }, [userName, sttService, aiService, ttsService])
+  }, [userName, sttService, aiService, ttsService, elevenLabsVoiceId, murfTtsVoiceId])
 
   useEffect(() => {
     if (chatBodyRef.current) {
@@ -824,7 +860,10 @@ function App() {
 
       setStatus(`Synthesizing voice via ${ttsService}...`)
       try {
-        await synthesizeSpeech(assistantResponse, ttsService)
+        await synthesizeSpeech(assistantResponse, ttsService, {
+          elevenLabsVoiceId,
+          murfTtsVoiceId,
+        })
       } catch (ttsError) {
         await speakWithBrowserTts(assistantResponse)
         addMessage(
@@ -931,6 +970,42 @@ function App() {
                 <option value="">No TTS service enabled</option>
               )}
             </select>
+            {ttsService === 'ElevenLabs TTS' && (
+              <div className="mt-2">
+                <label htmlFor="elevenLabsVoiceId" className="form-label mb-1">
+                  ElevenLabs Voice ID
+                </label>
+                <input
+                  id="elevenLabsVoiceId"
+                  type="text"
+                  className="form-control"
+                  value={elevenLabsVoiceId}
+                  onChange={(event) => setElevenLabsVoiceId(event.target.value)}
+                  placeholder={ELEVENLABS_VOICE_ID}
+                />
+                <div className="form-text">
+                  Default is loaded from <code>VITE_ELEVENLABS_VOICE_ID</code> in <code>frontend/.env</code>.
+                </div>
+              </div>
+            )}
+            {ttsService === 'Murf TTS' && (
+              <div className="mt-2">
+                <label htmlFor="murfTtsVoiceId" className="form-label mb-1">
+                  Murf TTS Voice ID
+                </label>
+                <input
+                  id="murfTtsVoiceId"
+                  type="text"
+                  className="form-control"
+                  value={murfTtsVoiceId}
+                  onChange={(event) => setMurfTtsVoiceId(event.target.value)}
+                  placeholder={MURF_TTS_VOICE_ID}
+                />
+                <div className="form-text">
+                  Default is loaded from <code>VITE_MURF_TTS_VOICE_ID</code> in <code>frontend/.env</code>.
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="d-grid gap-2 mb-3">
