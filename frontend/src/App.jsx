@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
-const STT_OPTIONS = [
+const ALL_STT_OPTIONS = [
   'Azure Speech-to-Text',
   'Google Cloud STT',
   'Deepgram',
@@ -11,9 +11,9 @@ const STT_OPTIONS = [
   'Murf Falcon',
 ]
 
-const AI_OPTIONS = ['Gemini', 'OpenAI API']
+const ALL_AI_OPTIONS = ['Gemini', 'OpenAI API']
 
-const TTS_OPTIONS = [
+const ALL_TTS_OPTIONS = [
   'Azure Text-to-Speech',
   'Google Cloud TTS',
   'OpenAI TTS',
@@ -31,6 +31,41 @@ const GEMINI_API_KEY = ENV.VITE_GEMINI_API_KEY
 const ELEVENLABS_API_KEY = ENV.VITE_ELEVENLABS_API_KEY
 const ELEVENLABS_TTS_MODEL = ENV.VITE_ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5'
 const ELEVENLABS_VOICE_ID = ENV.VITE_ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'
+
+const SERVICE_ENABLE_ENV_KEY = {
+  'Azure Speech-to-Text': 'VITE_ENABLE_AZURE_STT',
+  'Google Cloud STT': 'VITE_ENABLE_GOOGLE_CLOUD_STT',
+  Deepgram: 'VITE_ENABLE_DEEPGRAM',
+  'OpenAI Whisper API': 'VITE_ENABLE_OPENAI_WHISPER',
+  'ElevenLabs STT': 'VITE_ENABLE_ELEVENLABS_STT',
+  'Wispr Flow': 'VITE_ENABLE_WISPR_FLOW',
+  'Murf Falcon': 'VITE_ENABLE_MURF_FALCON',
+  Gemini: 'VITE_ENABLE_GEMINI',
+  'OpenAI API': 'VITE_ENABLE_OPENAI_API',
+  'Azure Text-to-Speech': 'VITE_ENABLE_AZURE_TTS',
+  'Google Cloud TTS': 'VITE_ENABLE_GOOGLE_CLOUD_TTS',
+  'OpenAI TTS': 'VITE_ENABLE_OPENAI_TTS',
+  'ElevenLabs TTS': 'VITE_ENABLE_ELEVENLABS_TTS',
+  'Amazon Polly': 'VITE_ENABLE_AMAZON_POLLY',
+  'Murf TTS': 'VITE_ENABLE_MURF_TTS',
+}
+
+function isServiceEnabled(provider) {
+  const envKey = SERVICE_ENABLE_ENV_KEY[provider]
+  if (!envKey) {
+    return true
+  }
+  const raw = ENV[envKey]
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return true
+  }
+  const normalized = String(raw).trim().toLowerCase()
+  return !['false', '0', 'no', 'off'].includes(normalized)
+}
+
+const STT_OPTIONS = ALL_STT_OPTIONS.filter(isServiceEnabled)
+const AI_OPTIONS = ALL_AI_OPTIONS.filter(isServiceEnabled)
+const TTS_OPTIONS = ALL_TTS_OPTIONS.filter(isServiceEnabled)
 
 const PROVIDER_ENV_KEYS = {
   'Azure Speech-to-Text': ['VITE_AZURE_STT_KEY', 'VITE_AZURE_STT_REGION'],
@@ -109,25 +144,25 @@ function readStoredPreferences() {
     if (!stored) {
       return {
         userName: '',
-        sttService: STT_OPTIONS[0],
-        aiService: AI_OPTIONS[0],
-        ttsService: TTS_OPTIONS[0],
+        sttService: STT_OPTIONS[0] || '',
+        aiService: AI_OPTIONS[0] || '',
+        ttsService: TTS_OPTIONS[0] || '',
       }
     }
 
     const parsed = JSON.parse(stored)
     return {
       userName: typeof parsed.userName === 'string' ? parsed.userName : '',
-      sttService: STT_OPTIONS.includes(parsed.sttService) ? parsed.sttService : STT_OPTIONS[0],
-      aiService: AI_OPTIONS.includes(parsed.aiService) ? parsed.aiService : AI_OPTIONS[0],
-      ttsService: TTS_OPTIONS.includes(parsed.ttsService) ? parsed.ttsService : TTS_OPTIONS[0],
+      sttService: STT_OPTIONS.includes(parsed.sttService) ? parsed.sttService : STT_OPTIONS[0] || '',
+      aiService: AI_OPTIONS.includes(parsed.aiService) ? parsed.aiService : AI_OPTIONS[0] || '',
+      ttsService: TTS_OPTIONS.includes(parsed.ttsService) ? parsed.ttsService : TTS_OPTIONS[0] || '',
     }
   } catch {
     return {
       userName: '',
-      sttService: STT_OPTIONS[0],
-      aiService: AI_OPTIONS[0],
-      ttsService: TTS_OPTIONS[0],
+      sttService: STT_OPTIONS[0] || '',
+      aiService: AI_OPTIONS[0] || '',
+      ttsService: TTS_OPTIONS[0] || '',
     }
   }
 }
@@ -501,6 +536,28 @@ function App() {
   const recognitionRef = useRef(null)
   const recognitionTranscriptRef = useRef('')
   const chatBodyRef = useRef(null)
+  const canRecord = Boolean(sttService && aiService && ttsService)
+
+  useEffect(() => {
+    if (sttService && STT_OPTIONS.includes(sttService)) {
+      return
+    }
+    setSttService(STT_OPTIONS[0] || '')
+  }, [sttService])
+
+  useEffect(() => {
+    if (aiService && AI_OPTIONS.includes(aiService)) {
+      return
+    }
+    setAiService(AI_OPTIONS[0] || '')
+  }, [aiService])
+
+  useEffect(() => {
+    if (ttsService && TTS_OPTIONS.includes(ttsService)) {
+      return
+    }
+    setTtsService(TTS_OPTIONS[0] || '')
+  }, [ttsService])
 
   useEffect(() => {
     const preferences = {
@@ -555,7 +612,10 @@ function App() {
   }
 
   const startRecording = async () => {
-    if (isProcessing || isRecording) {
+    if (isProcessing || isRecording || !canRecord) {
+      if (!canRecord) {
+        setError('Enable at least one STT, AI service and TTS service in frontend/.env.')
+      }
       return
     }
 
@@ -718,12 +778,17 @@ function App() {
               className="form-select"
               value={sttService}
               onChange={(event) => setSttService(event.target.value)}
+              disabled={!STT_OPTIONS.length}
             >
-              {STT_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
+              {STT_OPTIONS.length ? (
+                STT_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))
+              ) : (
+                <option value="">No STT service enabled</option>
+              )}
             </select>
           </div>
 
@@ -736,12 +801,17 @@ function App() {
               className="form-select"
               value={aiService}
               onChange={(event) => setAiService(event.target.value)}
+              disabled={!AI_OPTIONS.length}
             >
-              {AI_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
+              {AI_OPTIONS.length ? (
+                AI_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))
+              ) : (
+                <option value="">No AI service enabled</option>
+              )}
             </select>
           </div>
 
@@ -754,12 +824,17 @@ function App() {
               className="form-select"
               value={ttsService}
               onChange={(event) => setTtsService(event.target.value)}
+              disabled={!TTS_OPTIONS.length}
             >
-              {TTS_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
+              {TTS_OPTIONS.length ? (
+                TTS_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))
+              ) : (
+                <option value="">No TTS service enabled</option>
+              )}
             </select>
           </div>
 
@@ -769,7 +844,7 @@ function App() {
                 type="button"
                 className="btn btn-danger"
                 onClick={startRecording}
-                disabled={isProcessing}
+                disabled={isProcessing || !canRecord}
               >
                 Start Recording
               </button>
@@ -784,6 +859,11 @@ function App() {
             <strong>Status:</strong> {status}
           </div>
           {error && <div className="alert alert-danger py-2 mb-2">{error}</div>}
+          {!canRecord && (
+            <div className="alert alert-warning py-2 mb-2">
+              Enable at least one STT, AI and TTS option in <code>frontend/.env</code> to record.
+            </div>
+          )}
 
           <div className="alert alert-light border small mb-0">
             Cloud requests are used when related API keys are configured in <code>frontend/.env</code>.
