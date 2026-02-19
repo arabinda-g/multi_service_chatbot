@@ -15,7 +15,7 @@ const ALL_STT_OPTIONS = [
   'Murf Falcon',
 ]
 
-const ALL_AI_OPTIONS = ['Gemini', 'OpenAI API']
+const ALL_AI_OPTIONS = ['OpenAI API', 'Gemini']
 
 const ALL_TTS_OPTIONS = [
   'Azure Text-to-Speech',
