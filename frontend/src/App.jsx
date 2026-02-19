@@ -33,6 +33,7 @@ const ELEVENLABS_TTS_MODEL = ENV.VITE_ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5
 const ELEVENLABS_VOICE_ID = ENV.VITE_ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'
 const MURF_API_BASE_URL = ENV.VITE_MURF_API_BASE_URL || 'https://api.murf.ai'
 const MURF_FALCON_VOICE_ID = ENV.VITE_MURF_FALCON_VOICE_ID || 'en-US-natalie'
+const MURF_TTS_VOICE_ID = ENV.VITE_MURF_TTS_VOICE_ID || 'en-US-natalie'
 
 const SERVICE_ENABLE_ENV_KEY = {
   'Azure Speech-to-Text': 'VITE_ENABLE_AZURE_STT',
@@ -425,6 +426,60 @@ function speakWithBrowserTts(text) {
 }
 
 async function synthesizeSpeech(text, selectedProvider) {
+  if (selectedProvider === 'Murf TTS' && hasProviderKeys(selectedProvider)) {
+    const response = await fetch(`${MURF_API_BASE_URL}/v1/speech/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': ENV.VITE_MURF_TTS_API_KEY,
+      },
+      body: JSON.stringify({
+        text,
+        voiceId: MURF_TTS_VOICE_ID,
+        format: 'MP3',
+      }),
+    })
+
+    if (!response.ok) {
+      let detail = ''
+      try {
+        const errData = await response.json()
+        detail =
+          errData?.detail?.message ||
+          errData?.message ||
+          errData?.error?.message ||
+          JSON.stringify(errData)
+      } catch {
+        // Ignore body parse failures and use generic error.
+      }
+      throw new Error(
+        detail
+          ? `Murf TTS request failed (${response.status}): ${detail}`
+          : `Murf TTS request failed (${response.status})`,
+      )
+    }
+
+    const data = await response.json()
+    if (data.encodedAudio) {
+      const audioBlob = await (await fetch(`data:audio/mp3;base64,${data.encodedAudio}`)).blob()
+      await playAudioBlob(audioBlob)
+      return
+    }
+
+    if (!data.audioFile) {
+      throw new Error('Murf TTS returned no audio file.')
+    }
+
+    const audioResponse = await fetch(data.audioFile)
+    if (!audioResponse.ok) {
+      throw new Error(`Unable to fetch Murf audio file (${audioResponse.status})`)
+    }
+
+    const audioBlob = await audioResponse.blob()
+    await playAudioBlob(audioBlob)
+    return
+  }
+
   if (selectedProvider === 'Google Cloud TTS' && hasProviderKeys(selectedProvider)) {
     const response = await fetch(
       `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ENV.VITE_GOOGLE_CLOUD_TTS_API_KEY}`,
@@ -914,7 +969,7 @@ function App() {
         <section className="col-12 col-lg-8 p-0 h-100">
           <div className="card h-100 rounded-0">
             <div className="card-header">
-              Chatbox (Full Height)
+              Chatbox
               <span className="ms-2 badge text-bg-secondary">{userName.trim() || DEFAULT_USER_NAME}</span>
             </div>
             <div className="card-body chat-body" ref={chatBodyRef}>
