@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
+import { PollyClient, SynthesizeSpeechCommand } from '@aws-sdk/client-polly'
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { TranscribeClient, StartTranscriptionJobCommand, GetTranscriptionJobCommand } from '@aws-sdk/client-transcribe'
 import './App.css'
 
 const ALL_STT_OPTIONS = [
   'Azure Speech-to-Text',
   'Google Cloud STT',
   'Deepgram',
+  'AWS Transcribe',
   'OpenAI Whisper API',
   'ElevenLabs STT',
   'Wispr Flow',
@@ -34,11 +38,15 @@ const ELEVENLABS_VOICE_ID = ENV.VITE_ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJg
 const MURF_API_BASE_URL = ENV.VITE_MURF_API_BASE_URL || 'https://api.murf.ai'
 const MURF_FALCON_VOICE_ID = ENV.VITE_MURF_FALCON_VOICE_ID || 'en-US-natalie'
 const MURF_TTS_VOICE_ID = ENV.VITE_MURF_TTS_VOICE_ID || 'en-US-natalie'
+const AWS_POLLY_VOICE_ID = ENV.VITE_AWS_POLLY_VOICE_ID || 'Joanna'
+const AWS_TRANSCRIBE_BUCKET = ENV.VITE_AWS_TRANSCRIBE_BUCKET || ''
+const AWS_TRANSCRIBE_PREFIX = ENV.VITE_AWS_TRANSCRIBE_PREFIX || 'voice-inputs'
 
 const SERVICE_ENABLE_ENV_KEY = {
   'Azure Speech-to-Text': 'VITE_ENABLE_AZURE_STT',
   'Google Cloud STT': 'VITE_ENABLE_GOOGLE_CLOUD_STT',
   Deepgram: 'VITE_ENABLE_DEEPGRAM',
+  'AWS Transcribe': 'VITE_ENABLE_AWS_TRANSCRIBE',
   'OpenAI Whisper API': 'VITE_ENABLE_OPENAI_WHISPER',
   'ElevenLabs STT': 'VITE_ENABLE_ELEVENLABS_STT',
   'Wispr Flow': 'VITE_ENABLE_WISPR_FLOW',
@@ -74,6 +82,12 @@ const PROVIDER_ENV_KEYS = {
   'Azure Speech-to-Text': ['VITE_AZURE_STT_KEY', 'VITE_AZURE_STT_REGION'],
   'Google Cloud STT': ['VITE_GOOGLE_CLOUD_STT_API_KEY'],
   Deepgram: ['VITE_DEEPGRAM_API_KEY'],
+  'AWS Transcribe': [
+    'VITE_AWS_POLLY_ACCESS_KEY_ID',
+    'VITE_AWS_POLLY_SECRET_ACCESS_KEY',
+    'VITE_AWS_REGION',
+    'VITE_AWS_TRANSCRIBE_BUCKET',
+  ],
   'OpenAI Whisper API': ['VITE_OPENAI_API_KEY'],
   'ElevenLabs STT': ['VITE_ELEVENLABS_API_KEY'],
   'Wispr Flow': ['VITE_WISPR_FLOW_API_KEY'],
@@ -92,6 +106,7 @@ const IMPLEMENTED_CLOUD_PROVIDERS = new Set([
   'Azure Speech-to-Text',
   'Google Cloud STT',
   'Deepgram',
+  'AWS Transcribe',
   'ElevenLabs STT',
   'Murf Falcon',
   'OpenAI Whisper API',
@@ -101,6 +116,8 @@ const IMPLEMENTED_CLOUD_PROVIDERS = new Set([
   'Google Cloud TTS',
   'OpenAI TTS',
   'ElevenLabs TTS',
+  'Amazon Polly',
+  'Murf TTS',
 ])
 
 function hasProviderKeys(provider) {
@@ -129,6 +146,12 @@ function getProviderFallbackNote(provider) {
   return `${provider} is ready with keys from frontend/.env.`
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
 async function blobToBase64(audioBlob) {
   const arrayBuffer = await audioBlob.arrayBuffer()
   let binary = ''
@@ -138,6 +161,16 @@ async function blobToBase64(audioBlob) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
   }
   return btoa(binary)
+}
+
+function getAwsClientConfig() {
+  return {
+    region: ENV.VITE_AWS_REGION,
+    credentials: {
+      accessKeyId: ENV.VITE_AWS_POLLY_ACCESS_KEY_ID,
+      secretAccessKey: ENV.VITE_AWS_POLLY_SECRET_ACCESS_KEY,
+    },
+  }
 }
 
 const initialPreferences = readStoredPreferences()
@@ -221,6 +254,71 @@ async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) 
 
     const data = await response.json()
     return data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || ''
+  }
+
+  if (selectedProvider === 'AWS Transcribe' && hasProviderKeys(selectedProvider)) {
+    const awsConfig = getAwsClientConfig()
+    const s3Client = new S3Client(awsConfig)
+    const transcribeClient = new TranscribeClient(awsConfig)
+    const objectKey = `${AWS_TRANSCRIBE_PREFIX.replace(/\/$/, '')}/${Date.now()}-${Math.random().toString(36).slice(2)}.webm`
+
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: AWS_TRANSCRIBE_BUCKET,
+        Key: objectKey,
+        Body: audioBlob,
+        ContentType: audioBlob.type || 'audio/webm',
+      }),
+    )
+
+    const jobName = `frontend-transcribe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    await transcribeClient.send(
+      new StartTranscriptionJobCommand({
+        TranscriptionJobName: jobName,
+        LanguageCode: 'en-US',
+        MediaFormat: 'webm',
+        Media: {
+          MediaFileUri: `s3://${AWS_TRANSCRIBE_BUCKET}/${objectKey}`,
+        },
+      }),
+    )
+
+    let jobStatus = ''
+    let transcriptUri = ''
+    for (let i = 0; i < 30; i += 1) {
+      await sleep(2000)
+      const statusResponse = await transcribeClient.send(
+        new GetTranscriptionJobCommand({
+          TranscriptionJobName: jobName,
+        }),
+      )
+      const job = statusResponse.TranscriptionJob
+      jobStatus = job?.TranscriptionJobStatus || ''
+      if (jobStatus === 'COMPLETED') {
+        transcriptUri = job?.Transcript?.TranscriptFileUri || ''
+        break
+      }
+      if (jobStatus === 'FAILED') {
+        throw new Error(job?.FailureReason || 'AWS Transcribe job failed.')
+      }
+    }
+
+    if (!transcriptUri) {
+      throw new Error(
+        jobStatus
+          ? `AWS Transcribe timed out while status=${jobStatus}.`
+          : 'AWS Transcribe timed out before transcript became available.',
+      )
+    }
+
+    const transcriptResponse = await fetch(transcriptUri)
+    if (!transcriptResponse.ok) {
+      throw new Error(`Failed to fetch AWS transcript file (${transcriptResponse.status})`)
+    }
+
+    const transcriptData = await transcriptResponse.json()
+    return transcriptData.results?.transcripts?.[0]?.transcript?.trim() || ''
   }
 
   if (selectedProvider === 'ElevenLabs STT' && hasProviderKeys(selectedProvider)) {
@@ -421,6 +519,40 @@ function playAudioBlob(audioBlob) {
   })
 }
 
+async function audioStreamToBlob(audioStream, mimeType = 'audio/mpeg') {
+  if (!audioStream) {
+    throw new Error('No audio stream received.')
+  }
+
+  if (audioStream instanceof Blob) {
+    return audioStream
+  }
+
+  if (audioStream instanceof Uint8Array) {
+    return new Blob([audioStream], { type: mimeType })
+  }
+
+  if (audioStream?.transformToByteArray) {
+    const byteArray = await audioStream.transformToByteArray()
+    return new Blob([byteArray], { type: mimeType })
+  }
+
+  if (audioStream?.getReader) {
+    const reader = audioStream.getReader()
+    const chunks = []
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      chunks.push(value)
+    }
+    return new Blob(chunks, { type: mimeType })
+  }
+
+  return new Blob([audioStream], { type: mimeType })
+}
+
 function speakWithBrowserTts(text) {
   return new Promise((resolve) => {
     if (!window.speechSynthesis) {
@@ -440,6 +572,22 @@ function speakWithBrowserTts(text) {
 async function synthesizeSpeech(text, selectedProvider, options = {}) {
   const elevenLabsVoiceId = options.elevenLabsVoiceId?.trim() || ELEVENLABS_VOICE_ID
   const murfTtsVoiceId = options.murfTtsVoiceId?.trim() || MURF_TTS_VOICE_ID
+  if (selectedProvider === 'Amazon Polly' && hasProviderKeys(selectedProvider)) {
+    const pollyClient = new PollyClient(getAwsClientConfig())
+    const pollyResponse = await pollyClient.send(
+      new SynthesizeSpeechCommand({
+        OutputFormat: 'mp3',
+        VoiceId: AWS_POLLY_VOICE_ID,
+        Text: text,
+        Engine: 'neural',
+      }),
+    )
+
+    const audioBlob = await audioStreamToBlob(pollyResponse.AudioStream, 'audio/mpeg')
+    await playAudioBlob(audioBlob)
+    return
+  }
+
   if (selectedProvider === 'Murf TTS' && hasProviderKeys(selectedProvider)) {
     const response = await fetch(`${MURF_API_BASE_URL}/v1/speech/generate`, {
       method: 'POST',
