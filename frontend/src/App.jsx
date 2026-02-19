@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PollyClient, SynthesizeSpeechCommand } from '@aws-sdk/client-polly'
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 import { TranscribeClient, StartTranscriptionJobCommand, GetTranscriptionJobCommand } from '@aws-sdk/client-transcribe'
 import './App.css'
 
@@ -128,6 +128,11 @@ function hasProviderKeys(provider) {
   return requiredEnvKeys.every((envName) => String(ENV[envName] || '').trim())
 }
 
+function getMissingProviderKeys(provider) {
+  const requiredEnvKeys = PROVIDER_ENV_KEYS[provider] || []
+  return requiredEnvKeys.filter((envName) => !String(ENV[envName] || '').trim())
+}
+
 function getProviderFallbackNote(provider) {
   const hasKeys = hasProviderKeys(provider)
   const isImplemented = IMPLEMENTED_CLOUD_PROVIDERS.has(provider)
@@ -152,6 +157,17 @@ function sleep(ms) {
   })
 }
 
+function getMediaFormatFromBlob(audioBlob) {
+  const normalizedType = String(audioBlob?.type || '').toLowerCase()
+  if (normalizedType.includes('webm')) return 'webm'
+  if (normalizedType.includes('ogg')) return 'ogg'
+  if (normalizedType.includes('wav')) return 'wav'
+  if (normalizedType.includes('mpeg') || normalizedType.includes('mp3')) return 'mp3'
+  if (normalizedType.includes('flac')) return 'flac'
+  if (normalizedType.includes('mp4')) return 'mp4'
+  return 'webm'
+}
+
 async function blobToBase64(audioBlob) {
   const arrayBuffer = await audioBlob.arrayBuffer()
   let binary = ''
@@ -161,6 +177,39 @@ async function blobToBase64(audioBlob) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
   }
   return btoa(binary)
+}
+
+async function streamToText(streamLike) {
+  if (!streamLike) {
+    return ''
+  }
+
+  if (typeof streamLike.transformToString === 'function') {
+    return streamLike.transformToString()
+  }
+
+  if (typeof streamLike.getReader === 'function') {
+    const reader = streamLike.getReader()
+    const chunks = []
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+    }
+    const merged = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0))
+    let offset = 0
+    for (const chunk of chunks) {
+      merged.set(chunk, offset)
+      offset += chunk.length
+    }
+    return new TextDecoder('utf-8').decode(merged)
+  }
+
+  if (streamLike instanceof Blob) {
+    return streamLike.text()
+  }
+
+  return String(streamLike)
 }
 
 function getAwsClientConfig() {
@@ -217,6 +266,13 @@ function readStoredPreferences() {
 }
 
 async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) {
+  if (selectedProvider === 'AWS Transcribe') {
+    const missingKeys = getMissingProviderKeys(selectedProvider)
+    if (missingKeys.length) {
+      throw new Error(`AWS Transcribe missing required env keys: ${missingKeys.join(', ')}`)
+    }
+  }
+
   if (selectedProvider === 'OpenAI Whisper API' && hasProviderKeys(selectedProvider)) {
     const formData = new FormData()
     formData.append('file', new File([audioBlob], 'recording.webm', { type: audioBlob.type || 'audio/webm' }))
@@ -261,38 +317,56 @@ async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) 
     const s3Client = new S3Client(awsConfig)
     const transcribeClient = new TranscribeClient(awsConfig)
     const objectKey = `${AWS_TRANSCRIBE_PREFIX.replace(/\/$/, '')}/${Date.now()}-${Math.random().toString(36).slice(2)}.webm`
+    const mediaFormat = getMediaFormatFromBlob(audioBlob)
+    const audioBytes = new Uint8Array(await audioBlob.arrayBuffer())
 
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: AWS_TRANSCRIBE_BUCKET,
-        Key: objectKey,
-        Body: audioBlob,
-        ContentType: audioBlob.type || 'audio/webm',
-      }),
-    )
+    try {
+      await s3Client.send(
+        new PutObjectCommand({
+          Bucket: AWS_TRANSCRIBE_BUCKET,
+          Key: objectKey,
+          Body: audioBytes,
+          ContentType: audioBlob.type || 'audio/webm',
+        }),
+      )
+    } catch (err) {
+      throw new Error(`AWS S3 upload failed: ${err?.message || 'unknown error'}`)
+    }
 
     const jobName = `frontend-transcribe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const outputKey = `${AWS_TRANSCRIBE_PREFIX.replace(/\/$/, '')}/transcripts/${jobName}.json`
 
-    await transcribeClient.send(
-      new StartTranscriptionJobCommand({
-        TranscriptionJobName: jobName,
-        LanguageCode: 'en-US',
-        MediaFormat: 'webm',
-        Media: {
-          MediaFileUri: `s3://${AWS_TRANSCRIBE_BUCKET}/${objectKey}`,
-        },
-      }),
-    )
+    try {
+      await transcribeClient.send(
+        new StartTranscriptionJobCommand({
+          TranscriptionJobName: jobName,
+          LanguageCode: 'en-US',
+          MediaFormat: mediaFormat,
+          Media: {
+            MediaFileUri: `s3://${AWS_TRANSCRIBE_BUCKET}/${objectKey}`,
+          },
+          OutputBucketName: AWS_TRANSCRIBE_BUCKET,
+          OutputKey: outputKey,
+        }),
+      )
+    } catch (err) {
+      throw new Error(`AWS Transcribe start failed: ${err?.message || 'unknown error'}`)
+    }
 
     let jobStatus = ''
     let transcriptUri = ''
     for (let i = 0; i < 30; i += 1) {
       await sleep(2000)
-      const statusResponse = await transcribeClient.send(
-        new GetTranscriptionJobCommand({
-          TranscriptionJobName: jobName,
-        }),
-      )
+      let statusResponse
+      try {
+        statusResponse = await transcribeClient.send(
+          new GetTranscriptionJobCommand({
+            TranscriptionJobName: jobName,
+          }),
+        )
+      } catch (err) {
+        throw new Error(`AWS Transcribe status failed: ${err?.message || 'unknown error'}`)
+      }
       const job = statusResponse.TranscriptionJob
       jobStatus = job?.TranscriptionJobStatus || ''
       if (jobStatus === 'COMPLETED') {
@@ -312,12 +386,24 @@ async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) 
       )
     }
 
-    const transcriptResponse = await fetch(transcriptUri)
-    if (!transcriptResponse.ok) {
-      throw new Error(`Failed to fetch AWS transcript file (${transcriptResponse.status})`)
+    let transcriptData
+    try {
+      const transcriptObject = await s3Client.send(
+        new GetObjectCommand({
+          Bucket: AWS_TRANSCRIBE_BUCKET,
+          Key: outputKey,
+        }),
+      )
+      const transcriptText = await streamToText(transcriptObject.Body)
+      transcriptData = JSON.parse(transcriptText || '{}')
+    } catch (err) {
+      const details = err?.message || 'unknown error'
+      throw new Error(
+        `Failed to read AWS transcript from s3://${AWS_TRANSCRIBE_BUCKET}/${outputKey}: ${details}. ` +
+          `If this persists, allow GET in S3 CORS for your app origin.`,
+      )
     }
 
-    const transcriptData = await transcriptResponse.json()
     return transcriptData.results?.transcripts?.[0]?.transcript?.trim() || ''
   }
 
@@ -430,11 +516,16 @@ async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) 
     return data.transcription?.trim() || ''
   }
 
-  if (fallbackTranscript?.trim()) {
+  if (fallbackTranscript?.trim() && selectedProvider !== 'AWS Transcribe') {
     return fallbackTranscript.trim()
   }
 
   throw new Error(`No transcript captured. ${getProviderFallbackNote(selectedProvider)}`)
+}
+
+function canUseBrowserSttFallback(provider) {
+  // Keep AWS strict so failures are visible instead of looking like AWS succeeded.
+  return provider !== 'AWS Transcribe'
 }
 
 async function generateAiResponse(prompt, selectedProvider, userName) {
@@ -978,11 +1069,13 @@ function App() {
     try {
       setStatus(`Transcribing via ${sttService}...`)
       let transcript = ''
+      let transcriptProviderUsed = sttService
       try {
         transcript = await transcribeAudio(audioBlob, sttService, recognitionTranscriptRef.current)
       } catch (sttError) {
-        if (recognitionTranscriptRef.current.trim()) {
+        if (recognitionTranscriptRef.current.trim() && canUseBrowserSttFallback(sttService)) {
           transcript = recognitionTranscriptRef.current.trim()
+          transcriptProviderUsed = 'Browser SpeechRecognition'
           addMessage(
             'assistant',
             `Cloud STT failed (${sttError.message || 'unknown error'}). Used browser speech transcript fallback.`,
@@ -996,7 +1089,7 @@ function App() {
         throw new Error('Transcription was empty.')
       }
 
-      addMessage('user', transcript, sttService)
+      addMessage('user', transcript, transcriptProviderUsed)
 
       setStatus(`Generating answer via ${aiService}...`)
       const assistantResponse = await generateAiResponse(
