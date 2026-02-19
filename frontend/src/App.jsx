@@ -31,6 +31,8 @@ const GEMINI_API_KEY = ENV.VITE_GEMINI_API_KEY
 const ELEVENLABS_API_KEY = ENV.VITE_ELEVENLABS_API_KEY
 const ELEVENLABS_TTS_MODEL = ENV.VITE_ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5'
 const ELEVENLABS_VOICE_ID = ENV.VITE_ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'
+const MURF_API_BASE_URL = ENV.VITE_MURF_API_BASE_URL || 'https://api.murf.ai'
+const MURF_FALCON_VOICE_ID = ENV.VITE_MURF_FALCON_VOICE_ID || 'en-US-natalie'
 
 const SERVICE_ENABLE_ENV_KEY = {
   'Azure Speech-to-Text': 'VITE_ENABLE_AZURE_STT',
@@ -90,6 +92,7 @@ const IMPLEMENTED_CLOUD_PROVIDERS = new Set([
   'Google Cloud STT',
   'Deepgram',
   'ElevenLabs STT',
+  'Murf Falcon',
   'OpenAI Whisper API',
   'Gemini',
   'OpenAI API',
@@ -277,6 +280,43 @@ async function transcribeAudio(audioBlob, selectedProvider, fallbackTranscript) 
 
     const data = await response.json()
     return data.DisplayText?.trim() || ''
+  }
+
+  if (selectedProvider === 'Murf Falcon' && hasProviderKeys(selectedProvider)) {
+    const formData = new FormData()
+    formData.append('file', new File([audioBlob], 'recording.webm', { type: audioBlob.type || 'audio/webm' }))
+    formData.append('voice_id', MURF_FALCON_VOICE_ID)
+    formData.append('return_transcription', 'true')
+
+    const response = await fetch(`${MURF_API_BASE_URL}/v1/voice-changer/convert`, {
+      method: 'POST',
+      headers: {
+        'api-key': ENV.VITE_MURF_FALCON_API_KEY,
+      },
+      body: formData,
+    })
+
+    if (!response.ok) {
+      let detail = ''
+      try {
+        const errData = await response.json()
+        detail =
+          errData?.detail?.message ||
+          errData?.message ||
+          errData?.error?.message ||
+          JSON.stringify(errData)
+      } catch {
+        // Ignore body parse failures and use generic error.
+      }
+      throw new Error(
+        detail
+          ? `Murf Falcon STT request failed (${response.status}): ${detail}`
+          : `Murf Falcon STT request failed (${response.status})`,
+      )
+    }
+
+    const data = await response.json()
+    return data.transcription?.trim() || ''
   }
 
   if (fallbackTranscript?.trim()) {
