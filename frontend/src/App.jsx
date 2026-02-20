@@ -3,6 +3,7 @@ import { PollyClient, SynthesizeSpeechCommand } from '@aws-sdk/client-polly'
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 import { TranscribeClient, StartTranscriptionJobCommand, GetTranscriptionJobCommand } from '@aws-sdk/client-transcribe'
 import './App.css'
+import { getRuntimeEnv } from './envCrypto'
 
 const ALL_STT_OPTIONS = [
   'Azure Speech-to-Text',
@@ -29,7 +30,7 @@ const ALL_TTS_OPTIONS = [
 const STORAGE_KEY = 'multiServiceChatbotPreferences'
 const DEFAULT_USER_NAME = 'Guest'
 
-const ENV = import.meta.env
+const ENV = getRuntimeEnv(import.meta.env)
 const OPENAI_API_KEY = ENV.VITE_OPENAI_API_KEY
 const GEMINI_API_KEY = ENV.VITE_GEMINI_API_KEY
 const ELEVENLABS_API_KEY = ENV.VITE_ELEVENLABS_API_KEY
